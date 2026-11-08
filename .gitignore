@@ -1,0 +1,14 @@
+/target/
+/apps/desktop/node_modules/
+/apps/desktop/dist/
+/apps/desktop/src-tauri/target/
+/apps/desktop/src-tauri/gen/
+*.eeproj
+*.eeproj.autosave
+*.eeproj.bak
+*.tmp-*
+.DS_Store
+Thumbs.db
+
+# Keep the checked-in example project despite the general project-file ignore.
+!examples/*.eeproj

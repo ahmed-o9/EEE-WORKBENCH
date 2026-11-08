@@ -1,0 +1,5 @@
+[package]
+name = "eee-project"
+version = "0.1.0"
+edition = "2021"
+description = "Portable .eeproj project format with atomic save and recovery"

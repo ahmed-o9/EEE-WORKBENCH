@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/units",
+    "crates/numerical",
+    "crates/model",
+    "crates/project",
+    "crates/resource-manager",
+    "studios/circuit",
+]
+exclude = ["apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["EEE Workbench contributors"]
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 1
+panic = "abort"

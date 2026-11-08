@@ -1,0 +1,8 @@
+[package]
+name = "eee-circuit-studio"
+version = "0.1.0"
+edition = "2021"
+description = "Schematic graph conversion and validated circuit simulation boundary"
+
+[dependencies]
+eee-numerical = { path = "../../crates/numerical" }

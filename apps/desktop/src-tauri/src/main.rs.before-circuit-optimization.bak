@@ -1,0 +1,472 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use eee_circuit_studio::{
+    CircuitDocument, ElementKind, PinRef, SchematicElement, Terminal, Wire,
+};
+use eee_numerical::TransientConfig;
+use eee_project::{minijson, Project, RecoverySource};
+use eee_resource_manager::{MemoryPressure, ResourceSnapshot};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CircuitInputDto {
+    elements: Vec<ElementDto>,
+    wires: Vec<WireDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ElementDto {
+    id: String,
+    kind: String,
+    label: String,
+    value: f64,
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireDto {
+    from: PinDto,
+    to: PinDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PinDto {
+    component_id: String,
+    terminal: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SimulationConfigDto {
+    t_stop: f64,
+    t_step: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeValueDto {
+    label: String,
+    voltage: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceCurrentDto {
+    label: String,
+    current: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DcResponseDto {
+    node_voltages: Vec<NodeValueDto>,
+    device_currents: Vec<DeviceCurrentDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WaveformTraceDto {
+    label: String,
+    values: Vec<f64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransientResponseDto {
+    times: Vec<f64>,
+    traces: Vec<WaveformTraceDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectLoadDto {
+    name: String,
+    circuit: CircuitInputDto,
+    simulation_config: Option<SimulationConfigDto>,
+    results: serde_json::Value,
+    recovered_from: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceSnapshotDto {
+    total_memory_mb: Option<u64>,
+    available_memory_mb: Option<u64>,
+    used_memory_mb: Option<u64>,
+    memory_pressure: String,
+    logical_cpu_cores: usize,
+    cpu_usage_percent: Option<f32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SimulationEstimateDto {
+    unknown_count: usize,
+    time_points: usize,
+    estimated_peak_mb: f64,
+    recommended_budget_mb: Option<f64>,
+    fits_recommended_budget: Option<bool>,
+    recommended_workers: usize,
+}
+
+impl CircuitInputDto {
+    fn to_document(&self) -> Result<CircuitDocument, String> {
+        let elements = self.elements.iter().map(|element| {
+            let kind = match element.kind.as_str() {
+                "resistor" => ElementKind::Resistor,
+                "capacitor" => ElementKind::Capacitor,
+                "inductor" => ElementKind::Inductor,
+                "voltage_source" => ElementKind::VoltageSource,
+                "current_source" => ElementKind::CurrentSource,
+                "diode" => ElementKind::Diode,
+                "ground" => ElementKind::Ground,
+                other => return Err(format!("unsupported circuit element type '{other}'")),
+            };
+            Ok(SchematicElement {
+                id: element.id.clone(),
+                kind,
+                label: element.label.clone(),
+                value: element.value,
+                x: element.x,
+                y: element.y,
+            })
+        }).collect::<Result<Vec<_>, String>>()?;
+
+        let wires = self.wires.iter().map(|wire| {
+            Ok(Wire {
+                from: PinRef {
+                    component_id: wire.from.component_id.clone(),
+                    terminal: parse_terminal(&wire.from.terminal)?,
+                },
+                to: PinRef {
+                    component_id: wire.to.component_id.clone(),
+                    terminal: parse_terminal(&wire.to.terminal)?,
+                },
+            })
+        }).collect::<Result<Vec<_>, String>>()?;
+
+        Ok(CircuitDocument { elements, wires })
+    }
+}
+
+fn parse_terminal(value: &str) -> Result<Terminal, String> {
+    match value {
+        "a" => Ok(Terminal::A),
+        "b" => Ok(Terminal::B),
+        _ => Err(format!("unknown component terminal '{value}'")),
+    }
+}
+
+fn build_circuit(input: &CircuitInputDto) -> Result<(CircuitDocument, Vec<String>), String> {
+    let document = input.to_document()?;
+    let build = document.build_solver_circuit()?;
+    Ok((document, build.node_labels))
+}
+
+#[tauri::command]
+fn simulate_dc(input: CircuitInputDto) -> Result<DcResponseDto, String> {
+    let (document, node_labels) = build_circuit(&input)?;
+    let build = document.build_solver_circuit()?;
+    let result = build.circuit.dc().map_err(|error| error.to_string())?;
+    let node_voltages = result.node_voltages.iter().enumerate().map(|(index, voltage)| {
+        NodeValueDto {
+            label: node_labels.get(index).cloned().unwrap_or_else(|| format!("Node {index}")),
+            voltage: *voltage,
+        }
+    }).collect();
+    let device_currents = document.elements.iter()
+        .filter(|element| !matches!(element.kind, ElementKind::Ground))
+        .zip(result.device_currents.iter())
+        .map(|(element, current)| DeviceCurrentDto {
+            label: element.label.clone(),
+            current: *current,
+        })
+        .collect();
+    Ok(DcResponseDto { node_voltages, device_currents })
+}
+
+#[tauri::command]
+fn simulate_transient(
+    input: CircuitInputDto,
+    t_stop: f64,
+    t_step: f64,
+) -> Result<TransientResponseDto, String> {
+    let (document, node_labels) = build_circuit(&input)?;
+    let build = document.build_solver_circuit()?;
+    let result = build.circuit.transient(&TransientConfig { t_stop, t_step })
+        .map_err(|error| error.to_string())?;
+    let mut traces = Vec::with_capacity(node_labels.len().saturating_sub(1));
+    for node in 1..node_labels.len() {
+        let values = result.node_voltages.iter().map(|row| row[node]).collect();
+        traces.push(WaveformTraceDto {
+            label: node_labels[node].clone(),
+            values,
+        });
+    }
+    Ok(TransientResponseDto { times: result.times, traces })
+}
+
+fn make_project(
+    path: &str,
+    name: String,
+    circuit: CircuitInputDto,
+    simulation_config: Option<SimulationConfigDto>,
+    results: Option<serde_json::Value>,
+) -> Result<Project, String> {
+    let project_path = PathBuf::from(path);
+    let mut autosave_name = project_path.as_os_str().to_os_string();
+    autosave_name.push(".autosave");
+    let mut backup_name = project_path.as_os_str().to_os_string();
+    backup_name.push(".bak");
+    let mut autosave_backup_name = project_path.as_os_str().to_os_string();
+    autosave_backup_name.push(".autosave.bak");
+    let has_existing_copy = project_path.exists()
+        || PathBuf::from(autosave_name).exists()
+        || PathBuf::from(backup_name).exists()
+        || PathBuf::from(autosave_backup_name).exists();
+    // Preserve creation time and existing project metadata when saving an
+    // already-created project. A corrupt existing project is not overwritten.
+    let mut project = if has_existing_copy {
+        Project::load_with_recovery(&project_path)?.project
+    } else {
+        Project::new(name.clone())?
+    };
+    project.name = name.trim().to_string();
+    let circuit_json = serde_json::to_string(&circuit).map_err(|error| error.to_string())?;
+    project.studio_data = minijson::parse(&circuit_json)?;
+    project.simulation_config = match simulation_config {
+        Some(config) => {
+            let config_json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            minijson::parse(&config_json)?
+        }
+        None => minijson::Json::Null,
+    };
+    if let Some(results) = results {
+        project.results = minijson::parse(&results.to_string())?;
+    }
+    Ok(project)
+}
+
+#[tauri::command]
+fn save_project(
+    path: String,
+    name: String,
+    circuit: CircuitInputDto,
+    simulation_config: Option<SimulationConfigDto>,
+    results: Option<serde_json::Value>,
+) -> Result<String, String> {
+    let mut project = make_project(&path, name, circuit, simulation_config, results)?;
+    let path = PathBuf::from(path);
+    project.save(&path)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn autosave_project(
+    path: String,
+    name: String,
+    circuit: CircuitInputDto,
+    simulation_config: Option<SimulationConfigDto>,
+    results: Option<serde_json::Value>,
+) -> Result<String, String> {
+    let mut project = make_project(&path, name, circuit, simulation_config, results)?;
+    let autosave_path = project.autosave(PathBuf::from(path))?;
+    Ok(autosave_path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn load_project(path: String) -> Result<ProjectLoadDto, String> {
+    let recovered = Project::load_with_recovery(&path)?;
+    let circuit: CircuitInputDto = serde_json::from_str(&recovered.project.studio_data.write())
+        .map_err(|error| format!("project circuit data is invalid: {error}"))?;
+    let simulation_config = match &recovered.project.simulation_config {
+        minijson::Json::Null => None,
+        minijson::Json::Obj(fields) if fields.is_empty() => None,
+        value => Some(serde_json::from_str(&value.write())
+            .map_err(|error| format!("project simulation settings are invalid: {error}"))?),
+    };
+    let recovered_from = match recovered.source {
+        RecoverySource::Primary => "primary",
+        RecoverySource::Autosave => "autosave",
+        RecoverySource::Backup => "backup",
+        RecoverySource::AutosaveBackup => "autosave backup",
+    }.to_string();
+    Ok(ProjectLoadDto {
+        name: recovered.project.name,
+        circuit,
+        simulation_config,
+        results: serde_json::from_str(&recovered.project.results.write())
+            .map_err(|error| format!("project results are invalid: {error}"))?,
+        recovered_from,
+    })
+}
+
+#[tauri::command]
+fn estimate_simulation(input: CircuitInputDto, time_points: usize) -> Result<SimulationEstimateDto, String> {
+    let (document, _) = build_circuit(&input)?;
+    let build = document.build_solver_circuit()?;
+    let snapshot = ResourceSnapshot::detect();
+    let estimate = snapshot.estimate_dense_simulation(
+        build.circuit.unknown_count(),
+        time_points.max(1),
+        build.circuit.num_nodes + build.circuit.devices.len(),
+    )?;
+    let mib = 1024.0 * 1024.0;
+    Ok(SimulationEstimateDto {
+        unknown_count: estimate.unknown_count,
+        time_points: estimate.time_points,
+        estimated_peak_mb: estimate.estimated_peak_bytes as f64 / mib,
+        recommended_budget_mb: estimate.recommended_memory_budget_bytes.map(|bytes| bytes as f64 / mib),
+        fits_recommended_budget: estimate.fits_recommended_budget,
+        recommended_workers: estimate.recommended_workers,
+    })
+}
+
+#[tauri::command]
+fn resource_snapshot() -> ResourceSnapshotDto {
+    let snapshot = ResourceSnapshot::detect();
+    let to_mb = |bytes: Option<u64>| bytes.map(|value| value / (1024 * 1024));
+    let memory_pressure = match snapshot.memory_pressure {
+        MemoryPressure::Low => "low",
+        MemoryPressure::Moderate => "moderate",
+        MemoryPressure::High => "high",
+        MemoryPressure::Unknown => "unknown",
+    }.to_string();
+    ResourceSnapshotDto {
+        total_memory_mb: to_mb(snapshot.total_memory_bytes),
+        available_memory_mb: to_mb(snapshot.available_memory_bytes),
+        used_memory_mb: to_mb(snapshot.used_memory_bytes),
+        memory_pressure,
+        logical_cpu_cores: snapshot.logical_cpu_cores,
+        cpu_usage_percent: snapshot.cpu_usage_percent,
+    }
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            simulate_dc,
+            simulate_transient,
+            save_project,
+            autosave_project,
+            load_project,
+            resource_snapshot,
+            estimate_simulation,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running EEE Workbench");
+}
+
+
+#[cfg(test)]
+mod command_bridge_tests {
+    use super::*;
+    use std::fs;
+
+    fn divider_input() -> CircuitInputDto {
+        let elements = vec![
+            ElementDto { id: "v1".into(), kind: "voltage_source".into(), label: "V1".into(), value: 10.0, x: 100.0, y: 100.0 },
+            ElementDto { id: "r1".into(), kind: "resistor".into(), label: "R1".into(), value: 1_000.0, x: 300.0, y: 100.0 },
+            ElementDto { id: "r2".into(), kind: "resistor".into(), label: "R2".into(), value: 1_000.0, x: 500.0, y: 200.0 },
+            ElementDto { id: "gnd".into(), kind: "ground".into(), label: "GND".into(), value: 0.0, x: 100.0, y: 300.0 },
+        ];
+        let wires = vec![
+            WireDto { from: PinDto { component_id: "v1".into(), terminal: "a".into() }, to: PinDto { component_id: "r1".into(), terminal: "a".into() } },
+            WireDto { from: PinDto { component_id: "r1".into(), terminal: "b".into() }, to: PinDto { component_id: "r2".into(), terminal: "a".into() } },
+            WireDto { from: PinDto { component_id: "v1".into(), terminal: "b".into() }, to: PinDto { component_id: "gnd".into(), terminal: "a".into() } },
+            WireDto { from: PinDto { component_id: "r2".into(), terminal: "b".into() }, to: PinDto { component_id: "gnd".into(), terminal: "a".into() } },
+        ];
+        CircuitInputDto { elements, wires }
+    }
+
+    fn test_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "eee-workbench-command-{label}-{}-{}.eeproj",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ))
+    }
+
+    #[test]
+    fn schematic_dto_and_dc_command_return_actual_divider_solution() {
+        let input = divider_input();
+        let (document, labels) = build_circuit(&input).unwrap();
+        assert_eq!(labels, vec!["Ground", "Node 1", "Node 2"]);
+        let built = document.build_solver_circuit().unwrap();
+        let solved = built.circuit.dc().unwrap();
+        assert!((solved.node_voltages[1] - 10.0).abs() < 1e-9);
+        assert!((solved.node_voltages[2] - 5.0).abs() < 1e-9);
+
+        let response = simulate_dc(input).unwrap();
+        let serialized = serde_json::to_value(response).unwrap();
+        assert_eq!(serialized["nodeVoltages"][2]["label"], "Node 2");
+        assert!((serialized["nodeVoltages"][2]["voltage"].as_f64().unwrap() - 5.0).abs() < 1e-9);
+        assert!((serialized["deviceCurrents"][1]["current"].as_f64().unwrap() - 0.005).abs() < 1e-9);
+    }
+
+    #[test]
+    fn transient_command_returns_waveforms_from_solver_samples() {
+        let response = simulate_transient(divider_input(), 1e-3, 1e-4).unwrap();
+        assert_eq!(response.times.len(), 11);
+        assert_eq!(response.traces.len(), 2);
+        assert!(response.traces.iter().all(|trace| trace.values.len() == response.times.len()));
+        assert!((response.traces[1].values.last().unwrap() - 5.0).abs() < 1e-9);
+        let serialized = serde_json::to_value(response).unwrap();
+        assert!(serialized["traces"][1]["values"].is_array());
+    }
+
+    #[test]
+    fn project_command_save_and_reopen_round_trip_circuit_and_results() {
+        let path = test_path("round-trip");
+        let path_string = path.to_string_lossy().into_owned();
+        save_project(
+            path_string.clone(),
+            "Divider project".into(),
+            divider_input(),
+            Some(SimulationConfigDto { t_stop: 0.01, t_step: 0.0001 }),
+            Some(serde_json::json!({ "dcResult": { "nodeVoltages": [{ "label": "Node 2", "voltage": 5.0 }] } })),
+        ).unwrap();
+        let loaded = load_project(path_string).unwrap();
+        assert_eq!(loaded.name, "Divider project");
+        assert_eq!(loaded.recovered_from, "primary");
+        assert_eq!(loaded.circuit.elements.len(), 4);
+        assert_eq!(loaded.circuit.wires.len(), 4);
+        assert_eq!(loaded.simulation_config.unwrap().t_stop, 0.01);
+        assert_eq!(loaded.results["dcResult"]["nodeVoltages"][0]["voltage"], 5.0);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}.bak", path.display()));
+        let _ = fs::remove_file(format!("{}.autosave", path.display()));
+        let _ = fs::remove_file(format!("{}.autosave.bak", path.display()));
+    }
+
+    #[test]
+    fn command_autosave_recovers_after_primary_manifest_is_corrupted() {
+        let path = test_path("autosave-recovery");
+        let path_string = path.to_string_lossy().into_owned();
+        save_project(path_string.clone(), "Primary version".into(), divider_input(), None, None).unwrap();
+        autosave_project(
+            path_string.clone(),
+            "Recovered autosave version".into(),
+            divider_input(),
+            None,
+            Some(serde_json::json!({ "dcResult": { "recovered": true } })),
+        ).unwrap();
+        fs::write(&path, b"interrupted / corrupt primary write").unwrap();
+
+        let loaded = load_project(path_string).unwrap();
+        assert_eq!(loaded.name, "Recovered autosave version");
+        assert_eq!(loaded.recovered_from, "autosave");
+        assert_eq!(loaded.results["dcResult"]["recovered"], true);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}.bak", path.display()));
+        let _ = fs::remove_file(format!("{}.autosave", path.display()));
+        let _ = fs::remove_file(format!("{}.autosave.bak", path.display()));
+    }
+}

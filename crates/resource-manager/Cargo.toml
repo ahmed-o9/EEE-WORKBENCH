@@ -1,0 +1,5 @@
+[package]
+name = "eee-resource-manager"
+version = "0.1.0"
+edition = "2021"
+description = "Portable memory and compute budgeting for low-resource engineering workstations"

@@ -1,0 +1,6 @@
+
+[package]
+name = "eee-numerical"
+version = "0.1.0"
+edition = "2021"
+description = "Validated numerical kernels: LU, MNA assembly, DC/transient solvers"

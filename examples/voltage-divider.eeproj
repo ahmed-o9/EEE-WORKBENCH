@@ -1,0 +1,93 @@
+{
+  "format": "eeproj",
+  "schema_version": 1,
+  "metadata": {
+    "name": "Voltage Divider Example",
+    "created_at_ms": 1794065547648,
+    "modified_at_ms": 1794065547648
+  },
+  "active_studio": "circuit",
+  "studio_data": {
+    "elements": [
+      {
+        "id": "v1",
+        "kind": "voltage_source",
+        "label": "V1",
+        "value": 10.0,
+        "x": 150.0,
+        "y": 180.0
+      },
+      {
+        "id": "r1",
+        "kind": "resistor",
+        "label": "R1",
+        "value": 1000.0,
+        "x": 370.0,
+        "y": 180.0
+      },
+      {
+        "id": "r2",
+        "kind": "resistor",
+        "label": "R2",
+        "value": 1000.0,
+        "x": 590.0,
+        "y": 360.0
+      },
+      {
+        "id": "g1",
+        "kind": "ground",
+        "label": "GND",
+        "value": 0.0,
+        "x": 150.0,
+        "y": 420.0
+      }
+    ],
+    "wires": [
+      {
+        "from": {
+          "componentId": "v1",
+          "terminal": "a"
+        },
+        "to": {
+          "componentId": "r1",
+          "terminal": "a"
+        }
+      },
+      {
+        "from": {
+          "componentId": "r1",
+          "terminal": "b"
+        },
+        "to": {
+          "componentId": "r2",
+          "terminal": "a"
+        }
+      },
+      {
+        "from": {
+          "componentId": "v1",
+          "terminal": "b"
+        },
+        "to": {
+          "componentId": "g1",
+          "terminal": "a"
+        }
+      },
+      {
+        "from": {
+          "componentId": "r2",
+          "terminal": "b"
+        },
+        "to": {
+          "componentId": "g1",
+          "terminal": "a"
+        }
+      }
+    ]
+  },
+  "simulation_config": {
+    "tStop": 0.01,
+    "tStep": 1e-05
+  },
+  "results": null
+}

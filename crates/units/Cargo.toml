@@ -1,0 +1,6 @@
+
+[package]
+name = "eee-units"
+version = "0.1.0"
+edition = "2021"
+description = "SI quantities with dimensional validation for EEE Workbench"
